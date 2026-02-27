@@ -75,6 +75,8 @@ int read_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_dat
 int write_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_data );
 int validate_mempak( mempak_structure_t *pak );
 int get_mempak_free_space( mempak_structure_t *pak );
+int get_mempak_total_blocks( mempak_structure_t *pak );
+int get_mempak_total_free_space( mempak_structure_t *pak );
 int get_mempak_entry( mempak_structure_t *pak, int entry, entry_structure_t *entry_data );
 int format_mempak( mempak_structure_t *pak );
 int read_mempak_entry_data( mempak_structure_t *pak, entry_structure_t *entry, uint8_t *data );

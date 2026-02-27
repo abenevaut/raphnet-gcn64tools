@@ -94,9 +94,10 @@ static void ucs2_to_utf8(wchar_t *src, int len, char *dst)
  */
 int read_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_data )
 {
-    if( sector < 0 || sector >= 128 ) { return -1; }
     if( sector_data == 0 ) { return -1; }
     if( !pak || !pak->data ) { return -1; }
+    int max_sectors = (int)(pak->data_size / MEMPAK_BLOCK_SIZE);
+    if( sector < 0 || sector >= max_sectors ) { return -1; }
 
 	memcpy(sector_data, pak->data + sector * MEMPAK_BLOCK_SIZE, MEMPAK_BLOCK_SIZE);
 #if 0
@@ -132,9 +133,10 @@ int read_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_dat
  */
 int write_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_data )
 {
-    if( sector < 0 || sector >= 128 ) { return -1; }
     if( sector_data == 0 ) { return -1; }
     if( !pak || !pak->data ) { return -1; }
+    int max_sectors = (int)(pak->data_size / MEMPAK_BLOCK_SIZE);
+    if( sector < 0 || sector >= max_sectors ) { return -1; }
 
 	memcpy(pak->data + sector * MEMPAK_BLOCK_SIZE, sector_data, 256);
 #if 0
@@ -609,9 +611,11 @@ static int __get_num_pages( uint8_t *sector, int inode )
     int tally = 0;
     int last = inode;
     int rcount = 0;
+    /* Maximum number of user blocks per bank */
+    int max_blocks = BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1;
 
     /* If we go over this, something is wrong */
-    while( rcount < 123 )
+    while( rcount < max_blocks )
     {
         switch( sector[(last << 1) + 1] )
         {
@@ -676,8 +680,9 @@ static int __get_free_space( uint8_t *sector )
  */
 static int __get_note_block( uint8_t *sector, int inode, int block )
 {
+    int max_blocks = BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1;
     if( inode < BLOCK_VALID_FIRST || inode > BLOCK_VALID_LAST ) { return -1; }
-    if( block < 0 || block > 123 ) { return -1; }
+    if( block < 0 || block > max_blocks ) { return -1; }
 
     int tally = block + 1;
     int last = inode;
@@ -706,7 +711,7 @@ static int __get_note_block( uint8_t *sector, int inode, int block )
                     last = sector[(last << 1) + 1];
 
                     /* Failed to point to valid next block */
-                    if( last < 5 || last >= 128 ) { return -3; }
+                    if( last < BLOCK_VALID_FIRST || last > BLOCK_VALID_LAST ) { return -3; }
                     break;
             }
         }
@@ -916,7 +921,61 @@ int get_mempak_free_space( mempak_structure_t *mpk )
 }
 
 /**
- * @brief Format a mempak
+ * @brief Return the total number of user blocks available across all banks
+ *
+ * For a standard 1-bank pak this is 123.
+ * For a 4-bank (1Meg) pak this is 4×123 = 492.
+ * For a 16-bank (4Meg) pak this is 16×123 = 1968.
+ *
+ * @param[in] mpk  The mempak structure
+ *
+ * @return Total number of user blocks, or -1 on error
+ */
+int get_mempak_total_blocks( mempak_structure_t *mpk )
+{
+    if( !mpk ) return -1;
+    return (int)mpk->n_banks * (BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1);
+}
+
+/**
+ * @brief Return the total number of free blocks across all banks
+ *
+ * Walks the TOC of each bank and sums the free blocks.
+ *
+ * @param[in] mpk  The mempak structure
+ *
+ * @return Total number of free blocks, or a negative number on failure
+ */
+int get_mempak_total_free_space( mempak_structure_t *mpk )
+{
+    if( !mpk || !mpk->data ) return -2;
+
+    int total_free = 0;
+
+    for( unsigned int bank = 0; bank < mpk->n_banks; bank++ )
+    {
+        /* Each bank has its header at bank*128+0, TOC at bank*128+1 and bank*128+2 */
+        int base_sector = (int)(bank * 128);
+        uint8_t toc_data[MEMPAK_BLOCK_SIZE];
+
+        /* Try TOC1 first, then TOC2 */
+        if( read_mempak_sector( mpk, base_sector + 1, toc_data ) == 0 &&
+            __validate_toc( toc_data ) == 0 )
+        {
+            total_free += __get_free_space( toc_data );
+        }
+        else if( read_mempak_sector( mpk, base_sector + 2, toc_data ) == 0 &&
+                 __validate_toc( toc_data ) == 0 )
+        {
+            total_free += __get_free_space( toc_data );
+        }
+        /* If neither TOC is valid for this bank, skip it */
+    }
+
+    return total_free;
+}
+
+
  *
  * Formats a mempak.  Should only be done to wipe a mempak or to initialize
  * the filesystem in case of a blank or corrupt mempak.
@@ -1032,7 +1091,7 @@ int read_mempak_entry_data( mempak_structure_t *mpk, entry_structure_t *entry, u
     /* Some serious sanity checking */
     if( entry == 0 || data == 0 ) { return -1; }
     if( entry->valid == 0 ) { return -1; }
-    if( entry->blocks == 0 || entry->blocks > 123 ) { return -1; }
+    if( entry->blocks == 0 || entry->blocks > (BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1) ) { return -1; }
     if( entry->inode < BLOCK_VALID_FIRST || entry->inode > BLOCK_VALID_LAST ) { return -1; }
 
     /* Grab the TOC sector so we can get to the individual blocks the data comprises of */
@@ -1311,7 +1370,8 @@ int delete_mempak_entry( mempak_structure_t *mpk, entry_structure_t *entry )
     int last = entry->inode;
 
     /* Don't want to recurse forever if filesystem is corrupt */
-    while( tally <= 123 && !done )
+    int max_blocks = BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1;
+    while( tally <= max_blocks && !done )
     {
         tally++;
 

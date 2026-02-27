@@ -46,7 +46,13 @@ int main(int argc, char **argv)
 	}
 
 	printf("Mempak content is valid\n");
-	printf("Block usage: %d / %d\n", 123-get_mempak_free_space(mpk), 123);
+	{
+		int total  = get_mempak_total_blocks(mpk);
+		int free_b = get_mempak_total_free_space(mpk);
+		int used   = total - free_b;
+		printf("Banks: %d  |  Block usage: %d / %d  (%d free)\n",
+		       mpk->n_banks, used, total, free_b);
+	}
 
 	for (note = 0; note<MEMPAK_NUM_NOTES; note++) {
 		entry_structure_t note_data;

@@ -27,6 +27,8 @@ static void print_usage(void)
 	printf("Options:\n");
 	printf("   -h                Display help\n");
 	printf("   -f format         Write file in specified format (default: %s)\n", DEFAULT_FORMAT_STR);
+	printf("   -b banks          Number of 32 KiB banks (1=32K, 4=128K/1Meg, 16=512K/4Meg, max 62)\n");
+	printf("                     Default: 1 (standard Controller Pak)\n");
 	printf("\n");
 	printf("Formats:\n");
 	printf("   mpk               Standard 32kB .mpk file format\n");
@@ -41,10 +43,12 @@ int main(int argc, char **argv)
 	unsigned char type;
 	struct option long_options[] = {
 		{ "format", required_argument, 0, 'f' },
-		{ "help", no_argument, 0, 'h' },
+		{ "banks",  required_argument, 0, 'b' },
+		{ "help",   no_argument,       0, 'h' },
 		{ }, // terminator
 	};
 	const char *format = DEFAULT_FORMAT_STR;
+	unsigned int n_banks = 1;
 
 	if (argc < 2) {
 		print_usage();
@@ -54,7 +58,7 @@ int main(int argc, char **argv)
 	while(1) {
 		int c;
 
-		c = getopt_long(argc, argv, "f:h", long_options, NULL);
+		c = getopt_long(argc, argv, "f:b:h", long_options, NULL);
 		if (c==-1)
 			break;
 
@@ -65,6 +69,13 @@ int main(int argc, char **argv)
 				return 0;
 			case 'f':
 				format = optarg;
+				break;
+			case 'b':
+				n_banks = (unsigned int)atoi(optarg);
+				if (n_banks < 1 || n_banks > 62) {
+					fprintf(stderr, "Invalid bank count (1-62)\n");
+					return -1;
+				}
 				break;
 			case '?':
 				fprintf(stderr, "Unknown argument. Try -h\n");
@@ -79,7 +90,7 @@ int main(int argc, char **argv)
 	}
 
 	outfile = argv[optind];
-	mpk = mempak_new();
+	mpk = mempak_new_ex(n_banks);
 	if (!mpk) {
 		return 1;
 	}
@@ -87,7 +98,8 @@ int main(int argc, char **argv)
 	mempak_saveToFile(mpk, outfile, type);
 	mempak_free(mpk);
 
-	printf("Wrote empty (formatted) memory card file '%s' in '%s' format\n", outfile, mempak_format2string(type));
+	printf("Wrote empty (formatted) memory card file '%s' in '%s' format (%u bank(s), %u bytes)\n",
+	       outfile, mempak_format2string(type), n_banks, n_banks * 0x8000);
 
 	return 0;
 }

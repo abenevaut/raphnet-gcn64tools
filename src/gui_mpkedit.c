@@ -163,7 +163,11 @@ void mpke_syncModel(struct application *app)
 
 	gtk_tree_view_set_model(n64_notes_treeview, GTK_TREE_MODEL(n64_notes));
 
-	snprintf(statusbuf, sizeof(statusbuf), "Blocks used: %d / %d", 123-get_mempak_free_space(app->mpke->mpk), 123);
+	{
+		int total  = get_mempak_total_blocks(app->mpke->mpk);
+		int used   = total - get_mempak_total_free_space(app->mpke->mpk);
+		snprintf(statusbuf, sizeof(statusbuf), "Blocks used: %d / %d", used, total);
+	}
 	gtk_statusbar_push(mempak_status_bar, gtk_statusbar_get_context_id(mempak_status_bar, "free blocks"), statusbuf);
 
 }
