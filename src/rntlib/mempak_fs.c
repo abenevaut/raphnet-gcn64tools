@@ -96,6 +96,7 @@ int read_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_dat
 {
     if( sector < 0 || sector >= 128 ) { return -1; }
     if( sector_data == 0 ) { return -1; }
+    if( !pak || !pak->data ) { return -1; }
 
 	memcpy(sector_data, pak->data + sector * MEMPAK_BLOCK_SIZE, MEMPAK_BLOCK_SIZE);
 #if 0
@@ -133,6 +134,7 @@ int write_mempak_sector( mempak_structure_t *pak, int sector, uint8_t *sector_da
 {
     if( sector < 0 || sector >= 128 ) { return -1; }
     if( sector_data == 0 ) { return -1; }
+    if( !pak || !pak->data ) { return -1; }
 
 	memcpy(pak->data + sector * MEMPAK_BLOCK_SIZE, sector_data, 256);
 #if 0
@@ -927,6 +929,7 @@ int get_mempak_free_space( mempak_structure_t *mpk )
  */
 int format_mempak( mempak_structure_t *mpk )
 {
+    if( !mpk || !mpk->data ) { return -2; }
     /* Many mempak dumps exist online for users of emulated games to get
        saves that have all unlocks.  Every beginning sector on all these
        was the same, so this is the data I use to initialize the first

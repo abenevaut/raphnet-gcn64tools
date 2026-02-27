@@ -26,9 +26,12 @@
 #define DEXDRIVE_DATA_OFFSET	0x1040
 #define DEXDRIVE_COMMENT_OFFSET	0x40
 
-mempak_structure_t *mempak_new(void)
+mempak_structure_t *mempak_new_ex(unsigned int n_banks)
 {
 	mempak_structure_t *mpk;
+
+	if (n_banks == 0) n_banks = 1;
+	if (n_banks > MEMPAK_BANKS_MAX) n_banks = MEMPAK_BANKS_MAX;
 
 	mpk = calloc(1, sizeof(mempak_structure_t));
 	if (!mpk) {
@@ -36,9 +39,23 @@ mempak_structure_t *mempak_new(void)
 		return NULL;
 	}
 
+	mpk->n_banks   = (unsigned char)n_banks;
+	mpk->data_size = n_banks * MEMPAK_BANK_SIZE;
+	mpk->data      = calloc(1, mpk->data_size);
+	if (!mpk->data) {
+		perror("calloc data");
+		free(mpk);
+		return NULL;
+	}
+
 	format_mempak(mpk);
 
 	return mpk;
+}
+
+mempak_structure_t *mempak_new(void)
+{
+	return mempak_new_ex(1);
 }
 
 static int mempak_findFreeNote(mempak_structure_t *mpk, entry_structure_t *entry_data, int *note_id)
@@ -270,48 +287,38 @@ int mempak_saveToFile(mempak_structure_t *mpk, const char *dst_filename, unsigne
 			return -1;
 
 		case MPK_FORMAT_MPK:
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
+			/* Write all banks as-is (multi-bank files are stored contiguously) */
+			fwrite(mpk->data, mpk->data_size, 1, fptr);
 			break;
 
 		case MPK_FORMAT_MPK4:
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
+			/* Legacy 4-image format: repeat bank 0 four times for 1-bank paks,
+			 * or write all banks contiguously for multi-bank paks. */
+			if (mpk->n_banks == 1) {
+				fwrite(mpk->data, mpk->data_size, 1, fptr);
+				fwrite(mpk->data, mpk->data_size, 1, fptr);
+				fwrite(mpk->data, mpk->data_size, 1, fptr);
+				fwrite(mpk->data, mpk->data_size, 1, fptr);
+			} else {
+				fwrite(mpk->data, mpk->data_size, 1, fptr);
+			}
 			break;
 
 		case MPK_FORMAT_N64:
-			// Note: This should work well for files that will
-			// be imported by non-official software which typically
-			// only look for the 123-456-STD header and then
-			// seek to the data.
-			//
-			// Real .N64 files contain more info other info. Often
-			// 0x12: 01 00 00 03 03 03 03 03 03 03 03 03 03 03 03 03 03 03 03 00
-			//       ....
-			// 0x3F: 00
-			//
-			// Then at 0x40, there are 0x1000 bytes. I think there are 256
-			// bytes available for each of block. See comments in
-			// mempak_loadFromFile for more info.
+			/* DexDrive format: "123-456-STD" header, comments at 0x40,
+			 * data at 0x1040. Supports multi-bank by writing all banks
+			 * contiguously after the header. */
 			fprintf(fptr, "123-456-STD");
 
 			fseek(fptr, DEXDRIVE_COMMENT_OFFSET, SEEK_SET);
 			for (i=0; i<MEMPAK_NUM_NOTES; i++) {
 				unsigned char tmp = 0;
 				fwrite(mpk->note_comments[i], 255, 1, fptr);
-				// I'm not sure about the exact convention of the
-				// original format. Is is that comments are zero-terminated,
-				// but if the length is 256 then non-terminated (implcit termination?)
-				//
-				// Just to make sure nothing crashes by loading a file generated
-				// by this tool, I make sure there is always a zero.
 				fwrite(&tmp, 1, 1, fptr);
 			}
 
-
 			fseek(fptr, DEXDRIVE_DATA_OFFSET, SEEK_SET);
-			fwrite(mpk->data, sizeof(mpk->data), 1, fptr);
+			fwrite(mpk->data, mpk->data_size, 1, fptr);
 			break;
 	}
 
@@ -324,8 +331,8 @@ mempak_structure_t *mempak_loadFromFile(const char *filename)
 	FILE *fptr;
 	long file_size;
 	int i;
-	int num_images = -1;
 	long offset = 0;
+	unsigned int n_banks = 0;
 	mempak_structure_t *mpk;
 
 	mpk = calloc(1, sizeof(mempak_structure_t));
@@ -347,14 +354,15 @@ mempak_structure_t *mempak_loadFromFile(const char *filename)
 
 	printf("File size: %ld bytes\n", file_size);
 
-	/* Raw binary images. Those can contain more than one card's data. For
-	 * instance, Mupen64 seems to contain four saves. (I suppose each 32kB block is
-	 * for the virtual mempak of one controller) */
-	for (i=1; i<=4; i++) {
-		if (file_size == 0x8000*i) {
-			num_images = i;
-			printf("MPK file Contains %d image(s)\n", num_images);
-			if (file_size == 0x8000) {
+	/* Raw binary images.
+	 * Accept any multiple of MEMPAK_BANK_SIZE (1, 4, 16, 62 banks, etc.)
+	 * The old 4-image MPK4 format corresponds to 4 banks. */
+	if (file_size > 0 && (file_size % MEMPAK_BANK_SIZE) == 0) {
+		unsigned int banks = (unsigned int)(file_size / MEMPAK_BANK_SIZE);
+		if (banks >= 1 && banks <= MEMPAK_BANKS_MAX) {
+			n_banks = banks;
+			printf("MPK binary: %u bank(s)\n", n_banks);
+			if (banks == 1) {
 				mpk->file_format = MPK_FORMAT_MPK;
 			} else {
 				mpk->file_format = MPK_FORMAT_MPK4;
@@ -362,40 +370,57 @@ mempak_structure_t *mempak_loadFromFile(const char *filename)
 		}
 	}
 
-	if (num_images < 0) {
+	if (n_banks == 0) {
 		char header[11];
 		char *magic = "123-456-STD";
-		/* If the size is not a fixed multiple, it could be a .N64 file */
+		/* If the size is not a recognised multiple, it could be a .N64 file */
 		fread(header, 11, 1, fptr);
 		if (0 == memcmp(header, magic, sizeof(header))) {
 			printf(".N64 file detected\n");
 
-			/* At 0x40 there are often comments in .N64 files.
-			 * The actual memory card data starts at 0x1040.
-			 * This means there are exactly 0x1000 bytes for
-			 * one large comment, or, since 0x1000 / 256 = 16,
-			 * more likely one comment per note? That's what
-			 * I'm assuming here. */
 			fseek(fptr, DEXDRIVE_COMMENT_OFFSET, SEEK_SET);
 #if MAX_NOTE_COMMENT_SIZE != 257
-#error
+#error "MAX_NOTE_COMMENT_SIZE must be 257"
 #endif
 			for (i=0; i<16; i++) {
 				fread(mpk->note_comments[i], 256, 1, fptr);
-				/* The comments appear to be zero terminated, but I don't
-				 * know if the original tool allowed entering a maximum
-				 * of 256 or 255 bytes. So to be safe, I use buffers of
-				 * 257 bytes */
 				mpk->note_comments[i][256] = 0;
 			}
 
 			offset = DEXDRIVE_DATA_OFFSET;
 			mpk->file_format = MPK_FORMAT_N64;
+
+			/* Determine bank count from remaining data after header */
+			long data_bytes = file_size - DEXDRIVE_DATA_OFFSET;
+			if (data_bytes > 0 && (data_bytes % MEMPAK_BANK_SIZE) == 0) {
+				n_banks = (unsigned int)(data_bytes / MEMPAK_BANK_SIZE);
+				if (n_banks > MEMPAK_BANKS_MAX) n_banks = MEMPAK_BANKS_MAX;
+			} else {
+				/* Fallback: 1 bank */
+				n_banks = 1;
+			}
 		}
 	}
 
+	if (n_banks == 0) {
+		fprintf(stderr, "Unrecognised mempak file format or size\n");
+		fclose(fptr);
+		free(mpk);
+		return NULL;
+	}
+
+	mpk->n_banks   = (unsigned char)n_banks;
+	mpk->data_size = n_banks * MEMPAK_BANK_SIZE;
+	mpk->data      = calloc(1, mpk->data_size);
+	if (!mpk->data) {
+		perror("calloc data");
+		fclose(fptr);
+		free(mpk);
+		return NULL;
+	}
+
 	fseek(fptr, offset, SEEK_SET);
-	fread(mpk->data, sizeof(mpk->data), 1, fptr);
+	fread(mpk->data, mpk->data_size, 1, fptr);
 	fclose(fptr);
 
 	return mpk;
@@ -403,8 +428,10 @@ mempak_structure_t *mempak_loadFromFile(const char *filename)
 
 void mempak_free(mempak_structure_t *mpk)
 {
-	if (mpk)
+	if (mpk) {
+		free(mpk->data);
 		free(mpk);
+	}
 }
 
 const char *mempak_format2string(int fmt)
@@ -452,10 +479,13 @@ int mempak_getFilenameFormat(const char *filename)
 
 int mempak_hexdump(mempak_structure_t *pak)
 {
-	int i,j;
+	unsigned int i;
+	int j;
 
-	for (i=0; i<MEMPAK_MEM_SIZE; i+=0x20) {
-		printf("%04x: ", i);
+	if (!pak || !pak->data) return -1;
+
+	for (i=0; i < pak->data_size; i+=0x20) {
+		printf("%05x: ", i);
 		for (j=0; j<0x20; j++) {
 			printf("%02x ", pak->data[i+j]);
 		}

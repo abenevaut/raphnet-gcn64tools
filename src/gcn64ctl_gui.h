@@ -35,6 +35,7 @@ struct application {
 
 	struct mpkedit_data *mpke;
 	int stop_mempak_io;
+	unsigned int mempak_size; /* 0 = default 32 KiB; otherwise total bytes (n_banks * 32768) */
 	int inhibit_periodic_updates;
 	int controller_type[MAX_CONTROLLER_TYPES];
 	int firmware_maj, firmware_min, firmware_build;

@@ -20,38 +20,58 @@
 #include "mempak_stresstest.h"
 #include "hexdump.h"
 #include "mempak_gcn64usb.h"
+#include "mempak.h"
 #include "uiio.h"
 
-static int fill_pak(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v)
+static int fill_pak(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v, unsigned int total_size)
 {
-	int block;
+	unsigned int block;
+	unsigned int n_banks = total_size / MEMPAK_BANK_SIZE;
 	uint8_t fill[32];
 	int res;
 
 	memset(fill, v, sizeof(fill));
 
 	u->cur_progress = 0;
-	u->max_progress = 0x8000 - 32;
+	u->max_progress = total_size - 32;
 	u->progressStart(u);
 
-	for (block=0; block<0x8000; block+=32)
+	for (block = 0; block < total_size; block += 32)
 	{
+		unsigned int current_bank = block / MEMPAK_BANK_SIZE;
+		unsigned int bank_offset  = block % MEMPAK_BANK_SIZE;
+
 		u->cur_progress = block;
 		u->update(u);
 
-		res = gcn64lib_mempak_writeBlock(hdl, channel, block, fill);
+		/* Bank switch at 32-KiB boundaries */
+		if (n_banks > 1 && bank_offset == 0 && current_bank > 0) {
+			uint8_t bankbuf[32];
+			memset(bankbuf, (uint8_t)current_bank, sizeof(bankbuf));
+			gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+		}
+
+		res = gcn64lib_mempak_writeBlock(hdl, channel, (unsigned short)bank_offset, fill);
 		if (res < 0) {
 			return -1;
 		}
+	}
+
+	/* Reset to bank 0 */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
 	}
 
 	u->progressEnd(u, "Overwrite OK");
 	return 0;
 }
 
-static int check_fill(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v)
+static int check_fill(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v, unsigned int total_size)
 {
-	int block;
+	unsigned int block;
+	unsigned int n_banks = total_size / MEMPAK_BANK_SIZE;
 	uint8_t expected[32];
 	uint8_t buf[32];
 	int res;
@@ -59,15 +79,24 @@ static int check_fill(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v)
 	memset(expected, v, sizeof(expected));
 
 	u->cur_progress = 0;
-	u->max_progress = 0x8000 - 32;
+	u->max_progress = total_size - 32;
 	u->progressStart(u);
 
-	for (block=0; block<0x8000; block+=32)
+	for (block = 0; block < total_size; block += 32)
 	{
+		unsigned int current_bank = block / MEMPAK_BANK_SIZE;
+		unsigned int bank_offset  = block % MEMPAK_BANK_SIZE;
+
 		u->cur_progress = block;
 		u->update(u);
 
-		res = gcn64lib_mempak_readBlock(hdl, channel, block, buf);
+		if (n_banks > 1 && bank_offset == 0 && current_bank > 0) {
+			uint8_t bankbuf[32];
+			memset(bankbuf, (uint8_t)current_bank, sizeof(bankbuf));
+			gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+		}
+
+		res = gcn64lib_mempak_readBlock(hdl, channel, (unsigned short)bank_offset, buf);
 		if (res < 0) {
 			return -1;
 		}
@@ -79,14 +108,33 @@ static int check_fill(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v)
 		}
 	}
 
+	/* Reset to bank 0 */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
+
 	u->progressEnd(u, "Verify OK");
 	return 0;
 }
 
-int mempak_fill(rnt_hdl_t hdl, int channel, uint8_t pattern, int no_confirm, uiio *uio)
+int mempak_fill(rnt_hdl_t hdl, int channel, uint8_t pattern, int no_confirm, uiio *uio, unsigned int pak_size)
 {
 	uiio *u = getUIIO(uio);
+	unsigned int total_size;
+	unsigned int n_banks;
 	int res;
+
+	/* Resolve size */
+	if (pak_size == 0) {
+		total_size = MEMPAK_MEM_SIZE;
+	} else {
+		n_banks = pak_size / MEMPAK_BANK_SIZE;
+		if (n_banks == 0) n_banks = 1;
+		if (n_banks > MEMPAK_BANKS_MAX) n_banks = MEMPAK_BANKS_MAX;
+		total_size = n_banks * MEMPAK_BANK_SIZE;
+	}
 
 	u->multi_progress = 1;
 
@@ -99,15 +147,15 @@ int mempak_fill(rnt_hdl_t hdl, int channel, uint8_t pattern, int no_confirm, uii
 
 	///////////////////////////////////////////
 	u->caption = "Fill with pattern";
-	if (fill_pak(hdl, channel, u, pattern) < 0) {
+	if (fill_pak(hdl, channel, u, pattern, total_size) < 0) {
 		u->error("Error writing to mempak");
 		return -1;
 	}
 
 	///////////////////////////////////////////
-	u->multi_progress = 0; // this is the last step
+	u->multi_progress = 0; /* this is the last step */
 	u->caption = "Verify fill";
-	res = check_fill(hdl, channel, u, pattern);
+	res = check_fill(hdl, channel, u, pattern, total_size);
 	if (res < 0) {
 		if (res == -1) {
 			u->error("read error");

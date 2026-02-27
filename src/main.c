@@ -94,6 +94,11 @@ static void printUsage(void)
 	printf("  --gc_calibrate                     Send 8-bit command 0x42 to a gamecube controller\n");
 	printf("  --n64_getstatus                    Read N64 controller status now\n");
 	printf("  --n64_getcaps                      Get N64 controller capabilities (or status such as pak present)\n");
+	printf("  --mempak_size size                 Set the memory pak size for the next mempak operation.\n");
+	printf("                                         32k  (or 32768)   — Standard Nintendo Controller Pak (default)\n");
+	printf("                                         128k (or 131072)  — Datel 1Meg (4 banks)\n");
+	printf("                                         512k (or 524288)  — Datel 4Meg (16 banks)\n");
+	printf("                                         1984k (or 2031616)— Maximum (62 banks)\n");
 	printf("  --n64_mempak_dump                  Dump N64 mempak contents (Use with --outfile to write to file)\n");
 	printf("  --n64_mempak_write file            Write file to N64 mempak\n");
 	printf("  --n64_init_rumble                  Send rumble pack init command\n");
@@ -228,6 +233,7 @@ static void printUsage(void)
 #define OPT_N64_POLLRAW					362
 #define OPT_DC_POLLRAW					363
 #define OPT_DC_POLLRAW_MOUSE			364
+#define OPT_MEMPAK_SIZE					365
 
 struct option longopts[] = {
 	{ "help", 0, NULL, 'h' },
@@ -304,12 +310,13 @@ struct option longopts[] = {
 	{ "enable_highres", 0, NULL, OPT_HIGHRES },
 	{ "debug", 0, NULL, OPT_DEBUG },
 	{ "verbose", 0, NULL, 'v' },
+	{ "mempak_size", 1, NULL, OPT_MEMPAK_SIZE },
 	{ },
 };
 
 static int mempak_progress_cb(int addr, void *ctx)
 {
-	printf("\r%s 0x%04x / 0x%04x  ", (char*)ctx, addr, MEMPAK_MEM_SIZE); fflush(stdout);
+	printf("\r%s 0x%05x  ", (char*)ctx, addr); fflush(stdout);
 	return 0;
 }
 
@@ -358,6 +365,7 @@ int main(int argc, char **argv)
 	const char *infile = NULL;
 	int channel = 0;
 	int res;
+	unsigned int mempak_size = 0; /* 0 = default single-bank (32 KiB) */
 
 	while((opt = getopt_long(argc, argv, short_optstr, longopts, NULL)) != -1) {
 		switch(opt)
@@ -463,6 +471,23 @@ int main(int argc, char **argv)
 
 			case OPT_HIGHRES:
 				enable_highres = 1;
+				break;
+
+			case OPT_MEMPAK_SIZE:
+				{
+					/* Accept suffixes: k/K = *1024, m/M = *1024*1024 */
+					char *end;
+					unsigned long v = strtoul(optarg, &end, 0);
+					if (end == optarg) {
+						fprintf(stderr, "Invalid mempak size: %s\n", optarg);
+						return -1;
+					}
+					if (*end == 'k' || *end == 'K') v *= 1024;
+					else if (*end == 'm' || *end == 'M') v *= 1024 * 1024;
+					mempak_size = (unsigned int)v;
+					printf("Mempak size set to %u bytes (%u bank(s))\n",
+					       mempak_size, mempak_size / MEMPAK_BANK_SIZE);
+				}
 				break;
 		}
 	}
@@ -783,7 +808,7 @@ int main(int argc, char **argv)
 
 			case OPT_N64_MEMPAK_STRESSTEST:
 				{
-					res = mempak_stresstest(hdl, channel, 0);
+					res = mempak_stresstest(hdl, channel, 0, mempak_size);
 					printf("Test returned %d\n", res);
 					if (res != 0)
 						retval = 1;
@@ -792,7 +817,7 @@ int main(int argc, char **argv)
 
 			case OPT_N64_MEMPAK_FF_FILL:
 				{
-					res = mempak_fill(hdl, channel, 0xFF, noconfirm, NULL);
+					res = mempak_fill(hdl, channel, 0xFF, noconfirm, NULL, mempak_size);
 					if (res != 0)
 						retval = 1;
 				}
@@ -804,7 +829,7 @@ int main(int argc, char **argv)
 					int res;
 
 					printf("Reading mempak...\n");
-					res = gcn64lib_mempak_download(hdl, channel, &pak, mempak_progress_cb, "Reading address");
+					res = gcn64lib_mempak_download(hdl, channel, &pak, mempak_progress_cb, "Reading address", mempak_size);
 					printf("\n");
 					switch (res)
 					{
@@ -856,7 +881,7 @@ int main(int argc, char **argv)
 					}
 
 					printf("Writing to mempak...\n");
-					res = gcn64lib_mempak_upload(hdl, channel, pak, mempak_progress_cb, "Writing address");
+					res = gcn64lib_mempak_upload(hdl, channel, pak, mempak_progress_cb, "Writing address", mempak_size);
 					printf("\n");
 					if (res) {
 						switch(res)

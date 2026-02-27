@@ -69,6 +69,7 @@ static void setsensitive_n64_adapter_widgets(struct application *app, int sensit
 		GET_ELEMENT(GtkWidget, btn_read_mempak),
 		GET_ELEMENT(GtkWidget, btn_write_mempak),
 		GET_ELEMENT(GtkWidget, btn_erase_mempak),
+		GET_ELEMENT(GtkWidget, box_mempak_size),
 		GET_ELEMENT(GtkWidget, menuitem_display_cart_info),
 		GET_ELEMENT(GtkWidget, menuitem_read_cart_rom),
 		GET_ELEMENT(GtkWidget, menuitem_read_cart_ram),
@@ -965,12 +966,34 @@ G_MODULE_EXPORT void onFileRescan(GtkWidget *wid, gpointer data)
 	rebuild_device_list_store(data, NULL);
 }
 
+/* Called when the user picks a different mempak size in the combo box.
+ * The active row ID maps to: 0=32K, 1=128K, 2=512K, 3=1984K */
+G_MODULE_EXPORT void mempak_size_changed(GtkComboBox *combo, gpointer data)
+{
+	struct application *app = data;
+	static const unsigned int sizes[] = {
+		MEMPAK_SIZE_32K,
+		MEMPAK_SIZE_128K,
+		MEMPAK_SIZE_512K,
+		MEMPAK_SIZE_1984K,
+	};
+	gint idx = gtk_combo_box_get_active(combo);
+	if (idx >= 0 && idx < (gint)(sizeof(sizes)/sizeof(sizes[0]))) {
+		app->mempak_size = sizes[idx];
+	} else {
+		app->mempak_size = 0; /* fallback: default 32 KiB */
+	}
+	printf("Mempak size set to %u bytes (%u bank(s))\n",
+	       app->mempak_size, app->mempak_size / MEMPAK_BANK_SIZE);
+}
+
 static int mempak_io_progress_cb(int progress, void *ctx)
 {
 	struct application *app = ctx;
 	GET_UI_ELEMENT(GtkProgressBar, mempak_io_progress);
+	unsigned int total_size = app->mempak_size ? app->mempak_size : MEMPAK_MEM_SIZE;
 
-	gtk_progress_bar_set_fraction(mempak_io_progress, progress/((gdouble)MEMPAK_MEM_SIZE));
+	gtk_progress_bar_set_fraction(mempak_io_progress, progress / (gdouble)total_size);
 	while (gtk_events_pending()) {
 		gtk_main_iteration_do(FALSE);
 	}
@@ -994,7 +1017,7 @@ G_MODULE_EXPORT void erase_n64_pak(GtkWidget *wid, gpointer data)
 
 	u->caption = "Erasing Controller Pak...";
 
-	mempak_fill(app->current_adapter_handle, 0, 0xFF, 0, u);
+	mempak_fill(app->current_adapter_handle, 0, 0xFF, 0, u, app->mempak_size);
 }
 
 G_MODULE_EXPORT void write_n64_pak(GtkWidget *wid, gpointer data)
@@ -1027,7 +1050,7 @@ G_MODULE_EXPORT void write_n64_pak(GtkWidget *wid, gpointer data)
 			gtk_widget_show(GTK_WIDGET(mempak_io_dialog));
 
 			rnt_suspendPolling(app->current_adapter_handle, 1);
-			res = gcn64lib_mempak_upload(app->current_adapter_handle, 0, mpke_getCurrentMempak(app), mempak_io_progress_cb, app);
+			res = gcn64lib_mempak_upload(app->current_adapter_handle, 0, mpke_getCurrentMempak(app), mempak_io_progress_cb, app, app->mempak_size);
 			rnt_suspendPolling(app->current_adapter_handle, 0);
 			gtk_widget_hide(GTK_WIDGET(mempak_io_dialog));
 
@@ -1068,7 +1091,7 @@ G_MODULE_EXPORT void read_n64_pak(GtkWidget *wid, gpointer data)
 
 	app->stop_mempak_io = 0;
 	rnt_suspendPolling(app->current_adapter_handle, 1);
-	res = gcn64lib_mempak_download(app->current_adapter_handle, 0, &mpk, mempak_io_progress_cb, app);
+	res = gcn64lib_mempak_download(app->current_adapter_handle, 0, &mpk, mempak_io_progress_cb, app, app->mempak_size);
 	rnt_suspendPolling(app->current_adapter_handle, 0);
 
 	gtk_widget_hide(GTK_WIDGET(mempak_io_dialog));
@@ -1143,6 +1166,13 @@ main( int    argc,
 	gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(cssProvider), GTK_STYLE_PROVIDER_PRIORITY_USER);
 
 	app.mpke = mpkedit_new(&app);
+
+	/* Default mempak size: standard 32 KiB single-bank */
+	app.mempak_size = MEMPAK_SIZE_32K;
+	{
+		GtkComboBox *cb = GTK_COMBO_BOX(gtk_builder_get_object(app.builder, "cb_mempak_size"));
+		if (cb) gtk_combo_box_set_active(cb, 0);
+	}
 
     /* Get main window pointer from UI */
     window = GTK_WINDOW( gtk_builder_get_object( app.builder, "mainWindow" ) );

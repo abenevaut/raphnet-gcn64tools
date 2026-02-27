@@ -259,18 +259,34 @@ int gcn64lib_mempak_writeBlock(rnt_hdl_t hdl, unsigned char channel, unsigned sh
  * \param hdl The Adapter handler
  * \param channel The adapter channel (for multi-port adapters)
  * \param pak Pointer to mempak_structure pointer to store the new mempak
- * \param progressCb Callback to notify read progress (called after each block). The callback can return non-zero to abort.
+ * \param progressCb Callback to notify read progress (called after each block). Return non-zero to abort.
+ * \param pak_size Total size in bytes to read. 0 = default single-bank (MEMPAK_MEM_SIZE).
  * \return 0: Success, -1: No mempak, -2: IO/error, -3: Other errors, -4: Aborted
  */
-int gcn64lib_mempak_download(rnt_hdl_t hdl, int channel, mempak_structure_t **mempak, int (*progressCb)(int cur_addr, void *ctx), void *ctx)
+int gcn64lib_mempak_download(rnt_hdl_t hdl, int channel, mempak_structure_t **mempak,
+                             int (*progressCb)(int cur_addr, void *ctx), void *ctx,
+                             unsigned int pak_size)
 {
 	mempak_structure_t *pak;
-	unsigned short addr;
+	unsigned int addr;
+	unsigned int total_size;
+	unsigned int n_banks;
 	int res, try;
 
 	if (!mempak) {
 		return -3;
 	}
+
+	/* Resolve size */
+	if (pak_size == 0) {
+		total_size = MEMPAK_MEM_SIZE;
+	} else {
+		n_banks = pak_size / MEMPAK_BANK_SIZE;
+		if (n_banks == 0) n_banks = 1;
+		if (n_banks > MEMPAK_BANKS_MAX) n_banks = MEMPAK_BANKS_MAX;
+		total_size = n_banks * MEMPAK_BANK_SIZE;
+	}
+	n_banks = total_size / MEMPAK_BANK_SIZE;
 
 	if (gcn64lib_mempak_detect(hdl, channel)) {
 		return -1;
@@ -280,65 +296,126 @@ int gcn64lib_mempak_download(rnt_hdl_t hdl, int channel, mempak_structure_t **me
 	if (!pak) {
 		return -3;
 	}
+	pak->n_banks   = (unsigned char)n_banks;
+	pak->data_size = total_size;
+	pak->data      = calloc(1, total_size);
+	if (!pak->data) {
+		free(pak);
+		return -3;
+	}
 	pak->file_format = MPK_FORMAT_MPK;
 
-	for (addr = 0x0000; addr < MEMPAK_MEM_SIZE; addr+= 0x20)
+	for (addr = 0x0000; addr < total_size; addr += 0x20)
 	{
+		/* Each bank maps to physical addresses 0x0000-0x7FFF.
+		 * Select a new bank at the start of each 32-KiB boundary. */
+		unsigned int current_bank = addr / MEMPAK_BANK_SIZE;
+		unsigned int bank_offset  = addr % MEMPAK_BANK_SIZE;
+
+		if (n_banks > 1 && bank_offset == 0 && current_bank > 0) {
+			unsigned char bankbuf[32];
+			memset(bankbuf, (unsigned char)current_bank, sizeof(bankbuf));
+			gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+		}
+
 		for (try = 0; try < MEMPAK_IO_RETRIES; try++) {
-			res = gcn64lib_mempak_readBlock(hdl, channel, addr, &pak->data[addr]);
+			res = gcn64lib_mempak_readBlock(hdl, channel, (unsigned short)bank_offset, &pak->data[addr]);
 			if (res == 0x20) {
 				break;
 			}
 		}
 
 		if (try >= MEMPAK_IO_RETRIES) {
-			fprintf(stderr, "Error: Short read\n");
+			fprintf(stderr, "Error: Short read at address 0x%05x\n", addr);
+			free(pak->data);
 			free(pak);
 			return -2;
 		}
 
 		if (progressCb) {
-			if (progressCb(addr, ctx)) {
+			if (progressCb((int)addr, ctx)) {
+				free(pak->data);
+				free(pak);
 				return -4;
 			}
 		}
 	}
-	*mempak = pak;
 
+	/* Reset to bank 0 after multi-bank read */
+	if (n_banks > 1) {
+		unsigned char bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
+
+	*mempak = pak;
 	return 0;
 }
 
-int gcn64lib_mempak_upload(rnt_hdl_t hdl, int channel, mempak_structure_t *pak, int (*progressCb)(int cur_addr, void *ctx), void *ctx)
+int gcn64lib_mempak_upload(rnt_hdl_t hdl, int channel, mempak_structure_t *pak,
+                           int (*progressCb)(int cur_addr, void *ctx), void *ctx,
+                           unsigned int pak_size)
 {
-	unsigned short addr;
+	unsigned int addr;
+	unsigned int total_size;
+	unsigned int n_banks;
 	int res, try;
 
-	if (!pak) {
+	if (!pak || !pak->data) {
 		return -3;
 	}
+
+	/* Resolve size: prefer explicit pak_size, fall back to pak->data_size */
+	if (pak_size == 0) {
+		total_size = pak->data_size ? pak->data_size : MEMPAK_MEM_SIZE;
+	} else {
+		n_banks = pak_size / MEMPAK_BANK_SIZE;
+		if (n_banks == 0) n_banks = 1;
+		if (n_banks > MEMPAK_BANKS_MAX) n_banks = MEMPAK_BANKS_MAX;
+		total_size = n_banks * MEMPAK_BANK_SIZE;
+		if (total_size > pak->data_size) total_size = pak->data_size;
+	}
+	n_banks = total_size / MEMPAK_BANK_SIZE;
+
 	if (gcn64lib_mempak_detect(hdl, channel)) {
 		return -1;
 	}
 
-	for (addr = 0x0000; addr < MEMPAK_MEM_SIZE; addr+= 0x20)
+	for (addr = 0x0000; addr < total_size; addr += 0x20)
 	{
+		unsigned int current_bank = addr / MEMPAK_BANK_SIZE;
+		unsigned int bank_offset  = addr % MEMPAK_BANK_SIZE;
+
+		if (n_banks > 1 && bank_offset == 0 && current_bank > 0) {
+			unsigned char bankbuf[32];
+			memset(bankbuf, (unsigned char)current_bank, sizeof(bankbuf));
+			gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+		}
+
 		for (try = 0; try < MEMPAK_IO_RETRIES; try++) {
-			res = gcn64lib_mempak_writeBlock(hdl, channel, addr, &pak->data[addr]);
+			res = gcn64lib_mempak_writeBlock(hdl, channel, (unsigned short)bank_offset, &pak->data[addr]);
 			if (res == 0) {
 				break;
 			}
 		}
 
 		if (try >= MEMPAK_IO_RETRIES) {
-			fprintf(stderr, "Write error\n");
+			fprintf(stderr, "Write error at address 0x%05x\n", addr);
 			return -2;
 		}
 
 		if (progressCb) {
-			if (progressCb(addr, ctx)) {
+			if (progressCb((int)addr, ctx)) {
 				return -4;
 			}
 		}
+	}
+
+	/* Reset to bank 0 after multi-bank write */
+	if (n_banks > 1) {
+		unsigned char bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
 	}
 
 	return 0;
