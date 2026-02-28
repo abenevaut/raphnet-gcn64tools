@@ -732,6 +732,38 @@ static int __get_note_block( uint8_t *sector, int inode, int block )
  * @retval 1 the first sector has a valid TOC
  * @retval 2 the second sector has a valid TOC
  */
+/**
+ * @brief Return the sector index of the primary inode table for a given bank
+ *
+ * For N-bank paks (ares multi-bank layout):
+ *   - Inode table primary  bank b : sector (1 + b)
+ *   - Inode table copy     bank b : sector (1 + N + b)
+ *   - Note table (bank 0 only)    : sector (1 + 2*N)  and  (1 + 2*N + 1)
+ *   - First data sector (bank 0)  : sector (1 + 2*N + 2)
+ *   - Banks 1..N-1 : data starts at sector 1 of that bank (absolute = bank*128 + 1)
+ */
+static int __toc_primary_sector( mempak_structure_t *mpk, unsigned int bank )
+{
+    return (int)(1 + bank);
+}
+
+static int __toc_copy_sector( mempak_structure_t *mpk, unsigned int bank )
+{
+    return (int)(1 + mpk->n_banks + bank);
+}
+
+/** Sector index (in bank-0 address space) of the note table */
+static int __note_table_sector( mempak_structure_t *mpk )
+{
+    return (int)(1 + 2 * mpk->n_banks);
+}
+
+/** First data sector inside bank 0 */
+static int __first_data_sector_bank0( mempak_structure_t *mpk )
+{
+    return (int)(1 + 2 * mpk->n_banks + 2);
+}
+
 static int __get_valid_toc( mempak_structure_t *mpk )
 {
     /* We will need only one sector at a time */
@@ -750,37 +782,36 @@ static int __get_valid_toc( mempak_structure_t *mpk )
         return -3;
     }
 
-    /* Try to read the first TOC */
-    if( read_mempak_sector( mpk, 1, data ) )
+    int toc1 = __toc_primary_sector( mpk, 0 );
+    int toc2 = __toc_copy_sector( mpk, 0 );
+
+    /* Try to read the primary inode table */
+    if( read_mempak_sector( mpk, toc1, data ) )
     {
-        /* Couldn't read header */
+        /* Couldn't read TOC */
         return -2;
     }
 
     if( __validate_toc( data ) )
     {
-        /* First TOC is bad.  Maybe the second works? */
-        if( read_mempak_sector( mpk, 2, data ) )
+        /* Primary TOC is bad. Try the copy. */
+        if( read_mempak_sector( mpk, toc2, data ) )
         {
-            /* Couldn't read header */
             return -2;
         }
 
         if( __validate_toc( data ) )
         {
-            /* Second TOC is bad, nothing good on this memcard */
             return -3;
         }
         else
         {
-            /* Found a good TOC! */
-            return 2;
+            return toc2;
         }
     }
     else
     {
-        /* Found a good TOC! */
-        return 1;
+        return toc1;
     }
 }
 
@@ -800,8 +831,10 @@ static int __get_valid_toc( mempak_structure_t *mpk )
 int validate_mempak( mempak_structure_t *mpk )
 {
     int toc = __get_valid_toc( mpk );
+    int toc1 = __toc_primary_sector( mpk, 0 );
+    int toc2 = __toc_copy_sector( mpk, 0 );
 
-    if( toc == 1 || toc == 2 )
+    if( toc == toc1 || toc == toc2 )
     {
         /* Found a valid TOC */
         return 0;
@@ -845,9 +878,8 @@ int get_mempak_entry( mempak_structure_t *mpk, int entry, entry_structure_t *ent
         return -2;
     }
 
-    /* Entries are spread across two sectors, but we can luckly grab just one
-       with a single mempak read */
-	memcpy(data, mpk->data + (3 * MEMPAK_BLOCK_SIZE) + (entry * 32), 32);
+    /* Note table is at sector (1 + 2*N) in the multi-bank layout */
+	memcpy(data, mpk->data + ((size_t)__note_table_sector(mpk) * MEMPAK_BLOCK_SIZE) + (entry * 32), 32);
 #if 0
     if( read_mempak_address( mpk, (3 * MEMPAK_BLOCK_SIZE) + (entry * 32), data ) )
     {
@@ -934,7 +966,16 @@ int get_mempak_free_space( mempak_structure_t *mpk )
 int get_mempak_total_blocks( mempak_structure_t *mpk )
 {
     if( !mpk ) return -1;
-    return (int)mpk->n_banks * (BLOCK_VALID_LAST - BLOCK_VALID_FIRST + 1);
+    unsigned int N = mpk->n_banks;
+    if( N == 0 ) return 0;
+
+    /* Bank 0: pages 0..(1+2N+2-1) are system, data starts at (1+2N+2)
+     * Data pages in bank 0 = 128 - (1 + 2N + 2) = 125 - 2N
+     * Banks 1..N-1: page 0 unused, data = pages 1..127 = 127 pages each */
+    int bank0_data = 128 - __first_data_sector_bank0( mpk );  /* = 125 - 2N */
+    if( bank0_data < 0 ) bank0_data = 0;
+    int other_data = (N > 1) ? (int)(N - 1) * 127 : 0;
+    return bank0_data + other_data;
 }
 
 /**
@@ -954,28 +995,34 @@ int get_mempak_total_free_space( mempak_structure_t *mpk )
 
     for( unsigned int bank = 0; bank < mpk->n_banks; bank++ )
     {
-        /* Each bank has its header at bank*128+0, TOC at bank*128+1 and bank*128+2 */
-        int base_sector = (int)(bank * 128);
         uint8_t toc_data[MEMPAK_BLOCK_SIZE];
+        int pri = __toc_primary_sector( mpk, bank );
+        int cpy = __toc_copy_sector( mpk, bank );
 
-        /* Try TOC1 first, then TOC2 */
-        if( read_mempak_sector( mpk, base_sector + 1, toc_data ) == 0 &&
-            __validate_toc( toc_data ) == 0 )
+        if( read_mempak_sector( mpk, pri, toc_data ) != 0 ||
+            __validate_toc( toc_data ) != 0 )
         {
-            total_free += __get_free_space( toc_data );
+            if( read_mempak_sector( mpk, cpy, toc_data ) != 0 ||
+                __validate_toc( toc_data ) != 0 )
+                continue; /* skip invalid bank */
         }
-        else if( read_mempak_sector( mpk, base_sector + 2, toc_data ) == 0 &&
-                 __validate_toc( toc_data ) == 0 )
+
+        /* For bank 0, data starts at first_data_sector_bank0 (= 1+2N+2).
+         * For banks 1..N-1, data starts at sector 1.
+         * Count BLOCK_EMPTY entries from first_data up to 127. */
+        int first_data = (bank == 0) ? __first_data_sector_bank0( mpk ) : 1;
+        for( int i = first_data; i <= 127; i++ )
         {
-            total_free += __get_free_space( toc_data );
+            if( toc_data[(i << 1) + 1] == BLOCK_EMPTY )
+                total_free++;
         }
-        /* If neither TOC is valid for this bank, skip it */
     }
 
     return total_free;
 }
 
-
+/**
+ * @brief Format a mempak
  *
  * Formats a mempak.  Should only be done to wipe a mempak or to initialize
  * the filesystem in case of a blank or corrupt mempak.
@@ -989,74 +1036,95 @@ int get_mempak_total_free_space( mempak_structure_t *mpk )
 int format_mempak( mempak_structure_t *mpk )
 {
     if( !mpk || !mpk->data ) { return -2; }
-    /* Many mempak dumps exist online for users of emulated games to get
-       saves that have all unlocks.  Every beginning sector on all these
-       was the same, so this is the data I use to initialize the first
-       sector */
-    uint8_t sector[MEMPAK_BLOCK_SIZE] = { 0x81,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-                            0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
-                            0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
-                            0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
-                            0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-                            0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-                            0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
-                            0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-                            0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-                            0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+
+    unsigned int N = mpk->n_banks;
+
+    /* ------------------------------------------------------------------ */
+    /* Page 0 — System header (fixed magic, same for all banks)            */
+    /* ------------------------------------------------------------------ */
+    uint8_t sector[MEMPAK_BLOCK_SIZE] = {
+        0x81,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+        0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
+        0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
+        0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
+        0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0x05,0x1a,0x5f,0x13,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0x01,0xff,0x66,0x25,0x99,0xcd,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+
+    /* Embed bank count in the 4 redundant areas at offset 0x20+0x1A, 0x60+0x1A, etc.
+     * Areas are at 0x20, 0x60, 0x80, 0xC0 (indices 1, 3, 4, 6 × 0x20) */
+    static const int areas[] = { 0x20, 0x60, 0x80, 0xC0 };
+    for( int a = 0; a < 4; a++ )
+        sector[areas[a] + 0x1A] = (uint8_t)N;
 
     if( write_mempak_sector( mpk, 0, sector ) )
-    {
-        /* Couldn't write initial sector */
         return -2;
-    }
 
-    /* Write out entry sectors, which can safely be zero */
-    memset( sector, 0x0, MEMPAK_BLOCK_SIZE );
-    if( write_mempak_sector( mpk, 3, sector ) ||
-        write_mempak_sector( mpk, 4, sector ) )
+    /* ------------------------------------------------------------------ */
+    /* Pages 1..N   — Inode table primary  (one page per bank)            */
+    /* Pages N+1..2N — Inode table copy    (one page per bank)            */
+    /* ------------------------------------------------------------------ */
+    uint8_t toc[MEMPAK_BLOCK_SIZE];
+
+    for( unsigned int bank = 0; bank < N; bank++ )
     {
-        /* Couldn't write entry sectors */
-        return -2;
+        /* First data sector for this bank in the TOC's address space */
+        int first_data = (bank == 0)
+                         ? __first_data_sector_bank0( mpk )   /* 1 + 2N + 2 */
+                         : 1;                                  /* bank pages 1..127 */
+
+        memset( toc, 0, sizeof(toc) );
+
+        /* Mark all slots as EMPTY first */
+        for( int i = 0; i < 128; i++ )
+            toc[(i << 1) + 1] = BLOCK_EMPTY;
+
+        /* Slots before firstDataPage are system pages — mark as BLOCK_LAST (used/reserved) */
+        for( int i = 0; i < first_data; i++ )
+            toc[(i << 1) + 1] = BLOCK_LAST;
+
+        /* Fix checksum */
+        toc[1] = __get_toc_checksum( toc );
+
+        int pri = __toc_primary_sector( mpk, bank );
+        int cpy = __toc_copy_sector( mpk, bank );
+
+        if( write_mempak_sector( mpk, pri, toc ) ) return -2;
+        if( write_mempak_sector( mpk, cpy, toc ) ) return -2;
     }
 
-    /* Go through, insert 'empty sector' marking on all entries */
-    for( int i = 0; i < 128; i++ )
-    {
-        sector[(i << 1) + 1] = BLOCK_EMPTY;
-    }
-
-    /* Fix the checksum */
-    sector[1] = __get_toc_checksum( sector );
-
-    /* Write out */
-    if( write_mempak_sector( mpk, 1, sector ) ||
-        write_mempak_sector( mpk, 2, sector ) )
-    {
-        /* Couldn't write TOC sectors */
-        return -2;
-    }
+    /* ------------------------------------------------------------------ */
+    /* Pages 2N+1 and 2N+2 — Note table (16 entries × 32 bytes, zeroed)   */
+    /* ------------------------------------------------------------------ */
+    int note_sec = __note_table_sector( mpk );
+    memset( sector, 0, sizeof(sector) );
+    if( write_mempak_sector( mpk, note_sec,     sector ) ) return -2;
+    if( write_mempak_sector( mpk, note_sec + 1, sector ) ) return -2;
 
     return 0;
 }
@@ -1234,7 +1302,7 @@ int write_mempak_entry_data( mempak_structure_t *mpk, entry_structure_t *entry, 
     {
         entry_structure_t tmp_entry;
 
-		memcpy(tmp_data, mpk->data + (3 * MEMPAK_BLOCK_SIZE) + (i * 32), 32);
+		memcpy(tmp_data, mpk->data + ((size_t)__note_table_sector(mpk) * MEMPAK_BLOCK_SIZE) + (i * 32), 32);
 #if 0
         if( read_mempak_address( mpk, (3 * MEMPAK_BLOCK_SIZE) + (i * 32), tmp_data ) )
         {
@@ -1262,10 +1330,15 @@ int write_mempak_entry_data( mempak_structure_t *mpk, entry_structure_t *entry, 
     sector[1] = __get_toc_checksum( sector );
 
     /* Write back to alternate TOC first before erasing the known valid one */
-    if( write_mempak_sector( mpk, ( toc == 1 ) ? 2 : 1, sector ) )
     {
-        /* Failed to write alternate TOC */
-        return -2;
+        int alt_toc = (toc == __toc_primary_sector(mpk, 0))
+                      ? __toc_copy_sector(mpk, 0)
+                      : __toc_primary_sector(mpk, 0);
+        if( write_mempak_sector( mpk, alt_toc, sector ) )
+        {
+            /* Failed to write alternate TOC */
+            return -2;
+        }
     }
 
     /* Write back to good TOC now that alternate is updated */
@@ -1279,7 +1352,7 @@ int write_mempak_entry_data( mempak_structure_t *mpk, entry_structure_t *entry, 
     __write_note( entry, tmp_data );
 
     /* Store entry to empty slot on mempak */
-	memcpy(mpk->data + (3 * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), tmp_data, 32);
+	memcpy(mpk->data + ((size_t)__note_table_sector(mpk) * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), tmp_data, 32);
 #if 0
     if( write_mempak_address( mpk, (3 * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), tmp_data ) )
     {
@@ -1319,7 +1392,7 @@ int delete_mempak_entry( mempak_structure_t *mpk, entry_structure_t *entry )
     if( entry->inode < BLOCK_VALID_FIRST || entry->inode > BLOCK_VALID_LAST ) { return -1; }
 
     /* Ensure that the entry passed in matches what's on the mempak */
-	memcpy(data, mpk->data + 3 * MEMPAK_BLOCK_SIZE + entry->entry_id * 32, 32);
+	memcpy(data, mpk->data + (size_t)__note_table_sector(mpk) * MEMPAK_BLOCK_SIZE + entry->entry_id * 32, 32);
 #if 0
     if( read_mempak_address( mpk, (3 * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), data ) )
     {
@@ -1341,7 +1414,7 @@ int delete_mempak_entry( mempak_structure_t *mpk, entry_structure_t *entry )
     }
 
     /* The entry matches, so blank it */
-    memset( mpk->data + (3 * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), 0, 32 );
+    memset( mpk->data + ((size_t)__note_table_sector(mpk) * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), 0, 32 );
 #if 0
     memset( data, 0, 32 );
     if( write_mempak_address( mpk, (3 * MEMPAK_BLOCK_SIZE) + (entry->entry_id * 32), data ) )
@@ -1393,7 +1466,7 @@ int delete_mempak_entry( mempak_structure_t *mpk, entry_structure_t *entry )
                 last = next;
 
                 /* Failed to point to valid next block */
-                if( last < 5 || last >= 128 ) { return -3; }
+                if( last < BLOCK_VALID_FIRST || last > BLOCK_VALID_LAST ) { return -3; }
                 break;
             }
         }
@@ -1403,16 +1476,19 @@ int delete_mempak_entry( mempak_structure_t *mpk, entry_structure_t *entry )
     data[1] = __get_toc_checksum( data );
 
     /* Write back to alternate TOC first before erasing the known valid one */
-    if( write_mempak_sector( mpk, ( toc == 1 ) ? 2 : 1, data ) )
     {
-        /* Failed to write alternate TOC */
-        return -2;
+        int alt_toc = (toc == __toc_primary_sector(mpk, 0))
+                      ? __toc_copy_sector(mpk, 0)
+                      : __toc_primary_sector(mpk, 0);
+        if( write_mempak_sector( mpk, alt_toc, data ) )
+        {
+            return -2;
+        }
     }
 
     /* Write back to good TOC now that alternate is updated */
     if( write_mempak_sector( mpk, toc, data ) )
     {
-        /* Failed to write alternate TOC */
         return -2;
     }
 

@@ -278,13 +278,13 @@ static int burstTest(rnt_hdl_t hdl, unsigned char channel, uiio *u, int n_cycles
 	return 0;
 }
 
-int mempak_stresstest(rnt_hdl_t hdl, int channel, int first_test, unsigned int pak_size)
+int mempak_stresstest(rnt_hdl_t hdl, int channel, int first_test, unsigned int pak_size, int noconfirm)
 {
 	uiio *u = getUIIO(NULL);
 	unsigned int total_size;
 	unsigned int n_banks;
 	int res;
-	int no_disconnect = 0;
+	int no_disconnect = noconfirm; /* --noconfirm skips hot-disconnect/reconnect tests */
 
 	/* Resolve size */
 	if (pak_size == 0) {
@@ -298,9 +298,11 @@ int mempak_stresstest(rnt_hdl_t hdl, int channel, int first_test, unsigned int p
 
 	u->multi_progress = 1;
 
-	if (UIIO_YES != u->ask(UIIO_NOYES, "This test will erase your memory pak. Are you sure?")) {
-		printf("Cancelled\n");
-		return -1;
+	if (!noconfirm) {
+		if (UIIO_YES != u->ask(UIIO_NOYES, "This test will erase your memory pak. Are you sure?")) {
+			printf("Cancelled\n");
+			return -1;
+		}
 	}
 
 	///////////////////////////////////////////

@@ -71,15 +71,21 @@ int main(int argc, char **argv)
 				format = optarg;
 				break;
 			case 'b':
-				n_banks = (unsigned int)atoi(optarg);
-				if (n_banks < 1 || n_banks > 62) {
-					fprintf(stderr, "Invalid bank count (1-62)\n");
-					return -1;
+				{
+					char *endp;
+					unsigned long v = strtoul(optarg, &endp, 10);
+					if (endp == optarg || v < 1 || v > 62) {
+						fprintf(stderr, "Invalid bank count (1-62)\n");
+						return -1;
+					}
+					n_banks = (unsigned int)v;
 				}
 				break;
 			case '?':
 				fprintf(stderr, "Unknown argument. Try -h\n");
 				return -1;
+			default:
+				break;
 		}
 	}
 

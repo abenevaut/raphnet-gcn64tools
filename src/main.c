@@ -808,7 +808,7 @@ int main(int argc, char **argv)
 
 			case OPT_N64_MEMPAK_STRESSTEST:
 				{
-					res = mempak_stresstest(hdl, channel, 0, mempak_size);
+					res = mempak_stresstest(hdl, channel, 0, mempak_size, noconfirm);
 					printf("Test returned %d\n", res);
 					if (res != 0)
 						retval = 1;
