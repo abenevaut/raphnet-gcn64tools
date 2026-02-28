@@ -69,7 +69,7 @@ static void setsensitive_n64_adapter_widgets(struct application *app, int sensit
 		GET_ELEMENT(GtkWidget, btn_read_mempak),
 		GET_ELEMENT(GtkWidget, btn_write_mempak),
 		GET_ELEMENT(GtkWidget, btn_erase_mempak),
-		GET_ELEMENT(GtkWidget, box_mempak_size),
+		GET_ELEMENT(GtkWidget, cb_mempak_size),
 		GET_ELEMENT(GtkWidget, menuitem_display_cart_info),
 		GET_ELEMENT(GtkWidget, menuitem_read_cart_rom),
 		GET_ELEMENT(GtkWidget, menuitem_read_cart_ram),
