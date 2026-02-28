@@ -47,6 +47,14 @@ static int fill_pak_pseudoRandom(rnt_hdl_t hdl, unsigned char channel, uiio *u, 
 	u->max_progress = total_size - 32;
 	u->progressStart(u);
 
+	/* Ensure bank 0 is selected before starting (pak resets to bank 0 on
+	 * reconnect, but be explicit for multi-bank paks) */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
+
 	for (block = 0; block < total_size; block += 32)
 	{
 		unsigned int current_bank = block / MEMPAK_BANK_SIZE;
@@ -96,6 +104,14 @@ static int verify_pak_pseudoRandom(rnt_hdl_t hdl, unsigned char channel, uiio *u
 	u->cur_progress = 0;
 	u->max_progress = total_size - 32;
 	u->progressStart(u);
+
+	/* After a physical disconnect/reconnect (tests 7 & 8), the pak resets to
+	 * bank 0. Force explicit bank 0 selection before iterating. */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
 
 	for (block = 0; block < total_size; block += 32)
 	{
@@ -152,6 +168,13 @@ static int fill_pak(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v, un
 	u->max_progress = total_size - 32;
 	u->progressStart(u);
 
+	/* Ensure bank 0 is active before starting */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
+
 	for (block = 0; block < total_size; block += 32)
 	{
 		unsigned int current_bank = block / MEMPAK_BANK_SIZE;
@@ -195,6 +218,13 @@ static int check_fill(rnt_hdl_t hdl, unsigned char channel, uiio *u, uint8_t v, 
 	u->cur_progress = 0;
 	u->max_progress = total_size - 32;
 	u->progressStart(u);
+
+	/* Ensure bank 0 is active before starting */
+	if (n_banks > 1) {
+		uint8_t bankbuf[32];
+		memset(bankbuf, 0, sizeof(bankbuf));
+		gcn64lib_mempak_writeBlock(hdl, channel, 0x8000, bankbuf);
+	}
 
 	for (block = 0; block < total_size; block += 32)
 	{
