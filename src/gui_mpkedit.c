@@ -136,7 +136,8 @@ void mpke_syncModel(struct application *app)
 	GET_UI_ELEMENT(GtkTreeView, n64_notes_treeview);
 	GET_UI_ELEMENT(GtkStatusbar, mempak_status_bar);
 	int i, res;
-	char statusbuf[64];
+	char statusbuf[128];
+	int pak_invalid = 0;
 
 	gtk_list_store_clear(n64_notes);
 	if (!app->mpke->mpk) {
@@ -150,7 +151,11 @@ void mpke_syncModel(struct application *app)
 		gtk_list_store_append(n64_notes, &iter);
 
 		res = get_mempak_entry(app->mpke->mpk, i, &note_data);
-		if (res) {
+		if (res == -2) {
+			/* TOC/header invalid — mempak not formatted or corrupted */
+			pak_invalid = 1;
+			gtk_list_store_set(n64_notes, &iter, 0, i, 1, "—", 2, 0, -1);
+		} else if (res) {
 			gtk_list_store_set(n64_notes, &iter, 0, i, 1, "!!ERROR!!", 2, 0, -1);
 		} else {
 			if (note_data.valid) {
@@ -163,7 +168,10 @@ void mpke_syncModel(struct application *app)
 
 	gtk_tree_view_set_model(n64_notes_treeview, GTK_TREE_MODEL(n64_notes));
 
-	{
+	if (pak_invalid) {
+		snprintf(statusbuf, sizeof(statusbuf),
+		         "⚠ Mempak not formatted or invalid — use 'Erase N64 mempak' to format it");
+	} else {
 		int total  = get_mempak_total_blocks(app->mpke->mpk);
 		int used   = total - get_mempak_total_free_space(app->mpke->mpk);
 		snprintf(statusbuf, sizeof(statusbuf), "Blocks used: %d / %d", used, total);

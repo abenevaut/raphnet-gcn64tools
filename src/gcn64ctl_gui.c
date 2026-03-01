@@ -1010,14 +1010,61 @@ G_MODULE_EXPORT void mempak_io_stop(GtkWidget *wid, gpointer data)
 G_MODULE_EXPORT void erase_n64_pak(GtkWidget *wid, gpointer data)
 {
 	struct application *app = data;
-	uiio *u = getUIIO_gtk(NULL, app->mainwindow);
+	GET_UI_ELEMENT(GtkDialog, mempak_io_dialog);
+	GET_UI_ELEMENT(GtkLabel, mempak_op_label);
+	GtkWidget *confirm_dialog;
+	gint dlgres;
+	mempak_structure_t *fresh_mpk;
+	unsigned int n_banks;
+	int res;
 
 	if (!app->current_adapter_handle)
 		return;
 
-	u->caption = "Erasing Controller Pak...";
+	/* Ask for confirmation */
+	confirm_dialog = gtk_message_dialog_new(GTK_WINDOW(app->mainwindow), GTK_DIALOG_MODAL,
+	                                        GTK_MESSAGE_QUESTION, 0,
+	                                        "This will erase and format the N64 memory pak.\n\nAre you sure?");
+	gtk_dialog_add_buttons(GTK_DIALOG(confirm_dialog), "Cancel", 1, "Continue", 2, NULL);
+	dlgres = gtk_dialog_run(GTK_DIALOG(confirm_dialog));
+	gtk_widget_destroy(confirm_dialog);
 
-	mempak_fill(app->current_adapter_handle, 0, 0xFF, 0, u, app->mempak_size);
+	if (dlgres != 2)
+		return;
+
+	/* Build a freshly-formatted mempak of the right size */
+	n_banks = (app->mempak_size > 0) ? (app->mempak_size / MEMPAK_BANK_SIZE) : 1;
+	if (n_banks == 0) n_banks = 1;
+	fresh_mpk = mempak_new_ex(n_banks);
+	if (!fresh_mpk) {
+		errorPopup(app, "Memory allocation error");
+		return;
+	}
+
+	/* Upload the formatted image to the physical pak */
+	app->stop_mempak_io = 0;
+	gtk_label_set_text(mempak_op_label, "Formatting memory pak...");
+	gtk_widget_show(GTK_WIDGET(mempak_io_dialog));
+
+	rnt_suspendPolling(app->current_adapter_handle, 1);
+	res = gcn64lib_mempak_upload(app->current_adapter_handle, 0, fresh_mpk,
+	                             mempak_io_progress_cb, app, app->mempak_size);
+	rnt_suspendPolling(app->current_adapter_handle, 0);
+	gtk_widget_hide(GTK_WIDGET(mempak_io_dialog));
+
+	if (res != 0) {
+		mempak_free(fresh_mpk);
+		switch (res) {
+			case -1: errorPopup(app, "No mempak detected"); break;
+			case -2: errorPopup(app, "I/O error writing to mempak"); break;
+			case -4: errorPopup(app, "Format aborted"); break;
+			default: errorPopup(app, "Error formatting mempak"); break;
+		}
+		return;
+	}
+
+	/* Replace the in-memory editor contents with the fresh formatted image */
+	mpke_replaceMpk(app, fresh_mpk, NULL);
 }
 
 G_MODULE_EXPORT void write_n64_pak(GtkWidget *wid, gpointer data)
@@ -1107,6 +1154,12 @@ G_MODULE_EXPORT void read_n64_pak(GtkWidget *wid, gpointer data)
 	}
 	else {
 		mpke_replaceMpk(app, mpk, NULL);
+		/* Warn the user if the mempak is unformatted/corrupted */
+		if (validate_mempak(mpk) != 0) {
+			infoPopup(app, "The mempak was read successfully but appears to be\n"
+			               "unformatted or corrupted.\n\n"
+			               "Use 'Erase N64 mempak' to format it.");
+		}
 		gtk_widget_show(GTK_WIDGET(win_mempak_edit));
 	}
 }
