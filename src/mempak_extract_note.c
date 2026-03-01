@@ -46,6 +46,8 @@ int main(int argc, char **argv)
 
 	if (mempak_exportNote(mpk, note_id, outfile)) {
 		fprintf(stderr, "could not export note\n");
+		mempak_free(mpk);
+		return 1;
 	}
 
 	printf("Exported note %d to file '%s'\n", note_id, outfile);

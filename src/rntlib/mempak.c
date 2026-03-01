@@ -236,7 +236,7 @@ int mempak_exportNote(mempak_structure_t *mpk, int note_id, const char *dst_file
 	}
 
 	if (!note_header.valid) {
-		fprintf(stderr, "Invaid note\n");
+		fprintf(stderr, "Invalid note\n");
 		return -1;
 	}
 
